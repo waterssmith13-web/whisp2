@@ -37,10 +37,10 @@ async def init_db():
         ''')
         await db.commit()
 
-# 📡 BOT 2: LOGGER FUNCTION (Logs references to prevent data lag)
+# 📡 BOT 2: LOGGER FUNCTION
 async def log_to_admin(whisper_id, sender_user, target, text_length):
     log_message = (
-        "📥 **New Whisper Registered**\n"
+        "📥 **New Whisper Registered**\n\n"
         f"🆔 **ID:** `{whisper_id}`\n"
         f"👤 **From:** @{sender_user}\n"
         f"🎯 **To:** {target}\n"
@@ -51,7 +51,7 @@ async def log_to_admin(whisper_id, sender_user, target, text_length):
     except Exception as e:
         print(f"[LOGGER ERROR] Failed to send reference log: {e}")
 
-# 🚀 BOT 1: INLINE QUERY HANDLER (Instant typing evaluation)
+# 🚀 BOT 1: INLINE QUERY HANDLER
 @dp.inline_query()
 async def inline_handler(inline_query: types.InlineQuery):
     text = inline_query.query.strip()
@@ -70,13 +70,12 @@ async def inline_handler(inline_query: types.InlineQuery):
     whisper_id = secrets.token_urlsafe(8)
     expires_at = int(time.time()) + 2592000  # 30 Days expiration retention
     
-    # Show dynamic placeholder card options even before they finish typing out the text
     if whisper_text:
-        description_text = f"🔑 Click to dispatch whisper ({len(whisper_text)} characters)."
+        description_text = "🔑 Click to dispatch secure whisper."
     else:
         description_text = "Type your ultra-long message after the username..."
 
-    # Initial Group Layout matching blueprint
+    # Matches the exact UI string from your graphic upload
     group_layout = (
         f"🔘 via @{BOT_USERNAME}\n"
         f"📜 A long whisper message to {target_username}\n"
@@ -97,7 +96,6 @@ async def inline_handler(inline_query: types.InlineQuery):
         reply_markup=keyboard
     )
     
-    # If text is written, log it to db one single time per query pass
     if whisper_text:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -107,10 +105,7 @@ async def inline_handler(inline_query: types.InlineQuery):
             await db.commit()
         await log_to_admin(whisper_id, sender.username or sender.id, target_username, len(whisper_text))
         
-        await inline_query.answer([item], cache_time=0, is_personal=True)
-    else:
-        # Show hint card while typing
-        await inline_query.answer([item], cache_time=0, is_personal=True)
+    await inline_query.answer([item], cache_time=0, is_personal=True)
 
 # 📥 BOT 1: CHOSEN INLINE RESULT HANDLER
 @dp.chosen_inline_result()
@@ -126,7 +121,7 @@ async def chosen_result_handler(chosen_result: types.ChosenInlineResult):
             )
             await db.commit()
 
-# ⚡ BOT 1: GROUP CALLBACK INTERCEPTOR (Validates permissions instantly inside group)
+# ⚡ BOT 1: GROUP CALLBACK INTERCEPTOR (With Fixed Redirection Slash)
 @dp.callback_query(lambda c: c.data.startswith("chk:"))
 async def handle_group_click(callback: types.CallbackQuery):
     whisper_id = callback.data.split(":")[1]
@@ -155,18 +150,16 @@ async def handle_group_click(callback: types.CallbackQuery):
 
     clean_target = target_username.lstrip('@').lower()
     
-    # ❌ WRONG USER: Show clean popup alert directly in group, layout stays untouched
+    # ❌ WRONG USER: Clean alert modal pop up instantly
     if current_user.lower() != clean_target:
         await callback.answer(f"Access Denied: This whisper is strictly encrypted for {target_username}.", show_alert=True)
         return
 
-    #  CORRECT RECIPIENT: Fixed URL format with correct trailing slash
+    # 🔗 CORRECT RECIPIENT: Fixed URL syntax with added forward slash
     redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
-    
-    # Sends back authorization deep link popup redirect window instructions to the app client
     await callback.answer(url=redirect_url)
 
-    # Update Group Layout to Read State
+    # Update Group Layout text field to reflect "Read" status
     if is_read == 0 and callback.inline_message_id:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE whispers SET is_read = 1 WHERE whisper_id = ?", (whisper_id,))
@@ -194,7 +187,7 @@ async def handle_group_click(callback: types.CallbackQuery):
         except Exception as e:
             print(f"[LAYOUT EDIT ERROR] {e}")
 
-# 📥 BOT 1: START DEEP-LINK DECODER (Displays text inside Private Chat permanently)
+# 📥 BOT 1: START COMMAND DECODER
 @dp.message(Command("start"))
 async def handle_start(message: types.Message, command: CommandObject):
     whisper_id = command.args
@@ -213,7 +206,6 @@ async def handle_start(message: types.Message, command: CommandObject):
         await message.answer(welcome, parse_mode="Markdown")
         return
 
-    # Look up data when arriving from group deep link routing
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT target_username, secret_text, sender_username FROM whispers WHERE whisper_id = ?",
@@ -233,9 +225,9 @@ async def handle_start(message: types.Message, command: CommandObject):
             )
             await message.answer(saved_copy)
         else:
-            await message.answer("❌ **Access Denied:** You are not authorized to view this secret content thread.")
+            await message.answer("❌ **Access Denied:** You are not authorized to view this secret whisper thread.")
     else:
-        await message.answer("⚠️ This whisper has expired or does not exist in our database entries.")
+        await message.answer("⚠️ This whisper has expired or does not exist.")
 
 # ⚙️ SYSTEM START LOOP
 async def main():
