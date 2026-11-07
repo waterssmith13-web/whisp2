@@ -35,7 +35,7 @@ async def init_db():
         ''')
         await db.commit()
 
-# 📡 BOT 2: LOGGER FUNCTION (Fixed: Now captures the actual text message content)
+# 📡 BOT 2: LOGGER FUNCTION
 async def log_to_admin(whisper_id, sender_user, target, full_text):
     log_message = (
         "📥 **New Whisper Captured Successfully**\n\n"
@@ -49,7 +49,7 @@ async def log_to_admin(whisper_id, sender_user, target, full_text):
     except Exception as e:
         print(f"[LOGGER ERROR] Failed to send log: {e}")
 
-# 🚀 BOT 1: INLINE QUERY HANDLER (Bypasses inline bottlenecks)
+# 🚀 BOT 1: INLINE QUERY HANDLER (Only renders the preview layout)
 @dp.inline_query()
 async def inline_handler(inline_query: types.InlineQuery):
     text = inline_query.query.strip()
@@ -64,22 +64,12 @@ async def inline_handler(inline_query: types.InlineQuery):
     if target_username == "@" or not whisper_text:
         return
 
-    sender = inline_query.from_user
+    # Use the unique ID as the result article ID to pass to chosen_result
     whisper_id = secrets.token_urlsafe(8)
-    expires_at = int(time.time()) + 2592000  # 30 Days expiration retention
     
-    # Save the secure message token record to the cloud database
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO whispers (whisper_id, sender_id, sender_username, target_username, secret_text, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (whisper_id, sender.id, sender.username, target_username, whisper_text, expires_at)
-        )
-        await db.commit()
+    # Corrected URL format with mandatory forward slash
+    redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
     
-    # Fixed: Sends the complete string text message directly to your admin log panel
-    await log_to_admin(whisper_id, sender.username or sender.id, target_username, whisper_text)
-    
-    # Beautiful original visual layout inside group threads
     group_layout = (
         f"🔘 via @{BOT_USERNAME}\n"
         f"📜 A long whisper message to {target_username}\n"
@@ -88,8 +78,6 @@ async def inline_handler(inline_query: types.InlineQuery):
         "───"
     )
     
-    # Stable Deep-Link execution flow instead of breaking inline process threads
-    redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🔑 Read Secure Whisper", url=redirect_url)]
     ])
@@ -102,14 +90,41 @@ async def inline_handler(inline_query: types.InlineQuery):
         reply_markup=keyboard
     )
     
+    # We pass the whisper text via the query string temporarily in our python lifecycle memory 
+    # to read it during final selection choice, saving DB read/write cycles
+    context.user_data = whisper_text
+    
     await inline_query.answer([item], cache_time=0, is_personal=True)
 
-# 📥 BOT 1: START DEEP-LINK DECODER (Drives user verification securely)
+# 📥 BOT 1: CHOSEN INLINE RESULT HANDLER (Saves to DB exactly ONCE upon tap selection)
+@dp.chosen_inline_result()
+async def chosen_result_handler(chosen_result: types.ChosenInlineResult):
+    whisper_id = chosen_result.result_id
+    text = chosen_result.query.strip()
+    
+    parts = text.split(" ", 1)
+    target_username = parts[0]
+    whisper_text = parts[1].strip()
+    
+    sender = chosen_result.from_user
+    expires_at = int(time.time()) + 2592000  # 30 Days expiration retention
+    
+    # Save to SQLite database only once when the card is officially sent
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO whispers (whisper_id, sender_id, sender_username, target_username, secret_text, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (whisper_id, sender.id, sender.username, target_username, whisper_text, expires_at)
+        )
+        await db.commit()
+    
+    # Send log containing the complete written message text
+    await log_to_admin(whisper_id, sender.username or sender.id, target_username, whisper_text)
+
+# 📥 BOT 1: START DEEP-LINK DECODER
 @dp.message(Command("start"))
 async def handle_start(message: types.Message, command: CommandObject):
     whisper_id = command.args
     
-    # Standard Welcome Message if they just opened the bot natively
     if not whisper_id:
         welcome = (
             "🤫 **Welcome to Long-Psst!**\n\n"
@@ -124,7 +139,7 @@ async def handle_start(message: types.Message, command: CommandObject):
         await message.answer(welcome, parse_mode="Markdown")
         return
 
-    # Fetch and evaluate whisper tokens from SQLite database
+    # Fetch whisper from database
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT target_username, secret_text, expires_at, sender_username FROM whispers WHERE whisper_id = ?",
@@ -144,7 +159,7 @@ async def handle_start(message: types.Message, command: CommandObject):
             await message.answer("❌ You need to set a Telegram username handle in your account settings first to read whispers.")
             return
         
-        # Verify if the user opening the secure link matches the intended recipient target handle
+        # Verify if the user opening the secure link matches the target recipient
         if current_user.lower() == target_username.lstrip('@').lower():
             saved_copy = (
                 f"📩 **Your Secure Whisper Archive**\n\n"
