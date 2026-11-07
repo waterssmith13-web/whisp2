@@ -1,3 +1,2 @@
 aiogram>=3.0
 aiosqlite>=0.19
-You can now earn 10 Stars per 25 whisper's. Thank You for using our bot
