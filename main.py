@@ -98,7 +98,7 @@ async def inline_handler(inline_query: types.InlineQuery):
     )
     
     # Fixed: Hardcoded clean absolute pathing ensures Telegram intercepts the click inside the app client natively
-    absolute_bot_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
+    absolute_bot_url = f"https://t.me{//BOT_USERNAME}?start={whisper_id}"
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🔑 Read Secure Whisper", url=absolute_bot_url)]
     ])
